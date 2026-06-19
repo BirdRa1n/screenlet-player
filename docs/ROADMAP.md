@@ -38,9 +38,14 @@ paired device.
       IPTV server (port 7095) + Dispositivos panel section listing
       detected/paired Screenlet Player devices (Kodi devices keep the
       existing SSH-based flow, unaffected)
-- [ ] Studio's online/offline indicator for Player devices (heartbeat data
-      is there; panel currently shows it but hasn't been tuned for a
-      specific staleness threshold)
+- [x] Studio's online/offline indicator for Player devices: paired cards
+      show Online/Offline based on `lastSeenAt` within 60s (2 missed
+      20s heartbeats), matching the Wifi/WifiOff badge Kodi cards already use
+
+Verified end-to-end against a real Screenlet Studio instance (not just
+`httptest`): a `screenlet-player` binary pointed at `-studio-url` showed
+up unprompted in the Dispositivos panel, was claimed via the UI, and
+picked up the assigned channel's playlist URL on its next sync tick.
 
 ## v0.5.0 — Self-update
 
