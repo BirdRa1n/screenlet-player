@@ -6,6 +6,10 @@
 - `git`
 - macOS or Linux (this project is developed on macOS and deployed to
   Linux — see "Compiling for Linux" in the root `README.md`)
+- `mpv` (optional) — install via `brew install mpv` (macOS) or
+  `apt install mpv` (Linux) to exercise real playback locally. Without
+  it, `cmd` falls back to a `NoopPlayer` automatically; everything else
+  (control API, pairing, sync) still works.
 
 ## Getting started
 
@@ -15,8 +19,9 @@ cd screenlet-player
 go run ./cmd/screenlet-player
 ```
 
-This starts the local control API on `:8089` with a `NoopPlayer` backend
-(no real video output yet — see `docs/ROADMAP.md`). Useful flags:
+This starts the local control API on `:8089`, backed by `MPVPlayer` if
+`mpv` is on `PATH` (falls back to `NoopPlayer` with a logged warning
+otherwise — see `docs/ROADMAP.md`). Useful flags:
 
 ```bash
 go run ./cmd/screenlet-player -version       # print version and exit
@@ -27,10 +32,10 @@ go run ./cmd/screenlet-player -addr :9000    # change the control API port
 
 See `docs/ARCHITECTURE.md` for the full component map. The short version:
 `cmd/screenlet-player` wires together one implementation of each
-`internal/*` interface. Most `internal/*` packages currently only define
-an interface (`playback.Player`, `sync.Syncer`, `telemetry.Reporter`,
-`updater.Checker`, `display.Detector`) plus, where one exists yet, a real
-implementation (`storage`, `device`, `playback.NoopPlayer`, `api`).
+`internal/*` interface. `updater.Checker` and `display.Detector` are
+still interface-only — everything else has a real implementation
+(`storage`, `device`, `playback.MPVPlayer` with a `NoopPlayer` fallback,
+`sync.Client`/`Poller`, `telemetry.HTTPReporter`, `api`).
 
 ## Testing conventions
 

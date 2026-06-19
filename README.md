@@ -28,7 +28,7 @@ internal/
   api                    local HTTP control API (status, play, stop)
   device                 stable device identity, persisted across restarts
   display                output mode detection (resolution, fullscreen)
-  playback               Player interface; mpv backend planned (see ROADMAP)
+  playback               Player interface; MPVPlayer (mpv IPC) + NoopPlayer fallback
   sync                    polls Screenlet Studio for the device's channel
   telemetry              periodic heartbeats back to Screenlet Studio
   updater                checks GitHub Releases for newer builds

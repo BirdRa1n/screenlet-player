@@ -1,8 +1,8 @@
 # Build artifacts
 /dist/
 /bin/
-screenlet-player
-screenlet-player-*
+/screenlet-player
+/screenlet-player-*
 
 # Go
 *.test

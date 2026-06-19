@@ -15,9 +15,22 @@ control API — there are no compatibility guarantees yet.
 
 ## v0.2.0 — Real playback
 
-- [ ] `playback.Player` implementation backed by mpv's JSON IPC socket
+- [x] `playback.Player` implementation backed by mpv's JSON IPC socket
+      (`internal/playback/mpv.go`): launches mpv idle once, reuses the
+      same process across channel changes via `loadfile` — no restart.
+      `cmd` now tries `MPVPlayer` first and falls back to `NoopPlayer`
+      with a logged warning if mpv isn't installed (e.g. CI, a Mac with
+      no mpv), so the control API and pairing/sync are never blocked on it.
+      Verified live: built binary, drove `/play` and `/stop` over the real
+      control API, watched `position` advance in real time across
+      repeated `Play()` calls, then confirmed a SIGTERM cleanly killed
+      the mpv subprocess and removed its IPC socket.
 - [ ] `internal/display`: detect output resolution and force fullscreen
+      (mpv's own `--fullscreen` flag already covers "force fullscreen";
+      resolution detection for telemetry/logging purposes is still open)
 - [ ] Manual smoke test on at least one Raspberry Pi target (armv7/arm64)
+      (`-mpv-args` flag exists for this — e.g. `--vo=drm` — but untested
+      on real hardware)
 
 ## v0.3.0 / v0.4.0 — Pairing, sync and telemetry (done, ahead of v0.2.0)
 

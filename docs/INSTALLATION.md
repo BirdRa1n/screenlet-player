@@ -46,6 +46,22 @@ This will be a thin redirect to the same logic as `scripts/install.sh` —
 not a separate implementation — so behavior stays identical. Tracked in
 `docs/ROADMAP.md`.
 
+## Install mpv
+
+Real playback is backed by [mpv](https://mpv.io) over its JSON IPC
+socket (`internal/playback/mpv.go`) — install it on the device before
+starting the service:
+
+```bash
+sudo apt install mpv   # Debian/Raspberry Pi OS
+```
+
+If mpv isn't found on `PATH`, Screenlet Player logs a warning and falls
+back to a no-op backend: the control API and Studio pairing/sync still
+work, but nothing renders. Use `-mpv-bin` / `-mpv-args` (see
+`screenlet-player -h`) to point at a non-default mpv binary or pass
+hardware-specific flags such as `--vo=drm` on a Raspberry Pi.
+
 ## Running as a systemd service
 
 Signage devices should run Screenlet Player as a service that starts on
@@ -79,7 +95,8 @@ sudo journalctl -u screenlet-player -f   # tail logs
 ## Autostart on a kiosk box
 
 For a dedicated signage device (no desktop environment), running
-Screenlet Player as the systemd service above is sufficient once the
-real playback backend (mpv) lands — it will take over the display
-directly. Until then, the binary only exposes its control API; there is
-no fullscreen output yet to autostart into. See `docs/ROADMAP.md`.
+Screenlet Player as the systemd service above is sufficient — mpv takes
+over the display directly in fullscreen once a channel is assigned.
+Raspberry Pi hardware-accelerated output (`--vo=drm` or similar via
+`-mpv-args`) hasn't been smoke-tested on real hardware yet — see
+`docs/ROADMAP.md`.

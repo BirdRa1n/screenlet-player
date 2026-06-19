@@ -28,7 +28,7 @@ cmd/screenlet-player     entry point — wires the pieces below together
 internal/storage         local JSON config: device ID, pairing, channel
 internal/device          stable device identity (built on storage)
 internal/sync            polls Studio for the device's channel assignment
-internal/playback        Player interface; NoopPlayer today, mpv planned
+internal/playback        Player interface; MPVPlayer (mpv IPC) + NoopPlayer fallback
 internal/display         output mode detection (resolution, fullscreen)
 internal/api             local HTTP control API (status / play / stop)
 internal/telemetry       periodic heartbeats back to Studio
@@ -75,21 +75,28 @@ exposes — no inbound connection to the player is needed for any of this.
 Full flow, including how an admin claims a device, is in
 `docs/PAIRING.md`.
 
-## Why mpv (planned), not a bundled media center
+## Why mpv, not a bundled media center
 
 The `playback.Player` interface in `internal/playback` is backend-agnostic
-on purpose. The first real implementation is planned around
-[mpv](https://mpv.io)'s JSON IPC socket:
+on purpose. The real implementation, `MPVPlayer`
+(`internal/playback/mpv.go`), drives [mpv](https://mpv.io) over its JSON
+IPC socket:
 
 - Hardware-accelerated decode on Raspberry Pi and similar low-power boards.
 - A single long-running process per device, controlled over a Unix socket
-  — no HTTP/JSON-RPC server to configure inside the player itself.
+  — no HTTP/JSON-RPC server to configure inside the player itself. mpv is
+  launched once, idle, and every channel change is just a `loadfile`
+  command against the same process — no restart, unlike the Kodi+SSH
+  bridge this replaces.
 - No bundled skin, add-on manager, or general-purpose media center UI —
   Screenlet Player only ever shows one fullscreen stream.
 
-Until that lands, `playback.NewNoopPlayer()` is wired into `cmd`, so the
-binary builds, runs, and its control API is fully testable on a machine
-with no display attached (e.g. CI, or a developer's Mac).
+`cmd` tries to start `MPVPlayer` first and falls back to
+`playback.NewNoopPlayer()` with a logged warning if mpv isn't installed
+or has no usable video output. This keeps the binary buildable, runnable,
+and its control API fully testable on a machine with no display attached
+(e.g. CI, or a developer's Mac) without making mpv a hard dependency of
+the package itself.
 
 ## Why no CGO
 
