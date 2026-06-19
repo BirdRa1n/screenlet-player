@@ -19,20 +19,28 @@ control API — there are no compatibility guarantees yet.
 - [ ] `internal/display`: detect output resolution and force fullscreen
 - [ ] Manual smoke test on at least one Raspberry Pi target (armv7/arm64)
 
-## v0.3.0 — Pairing and sync
+## v0.3.0 / v0.4.0 — Pairing, sync and telemetry (done, ahead of v0.2.0)
 
-- [ ] Pairing flow per `docs/PAIRING.md` (device-generated code, claimed
-      from Screenlet Studio's Dispositivos panel)
-- [ ] `sync.Syncer` implementation: polls Studio for `ChannelAssignment`
-      and triggers `playback.Player.Play` on change — no restart required
-- [ ] Studio-side: pairing UI, replacing manual IP/SSH entry for Player
-      devices (Kodi devices keep the existing SSH-based flow)
+Implemented before real playback because it only required the existing
+`NoopPlayer` to prove out end-to-end — see `docs/PAIRING.md` for the full
+design. `playback.Player.Play` is already wired to whatever `sync.Poller`
+receives, so v0.2.0's mpv backend is a drop-in away from going live on a
+paired device.
 
-## v0.4.0 — Telemetry
-
-- [ ] `telemetry.Reporter` implementation: periodic heartbeat to Studio
-- [ ] Studio's Dispositivos panel shows online/offline for Player devices
-      without polling SSH or Kodi's JSON-RPC
+- [x] Pairing flow per `docs/PAIRING.md` (device announces via heartbeat,
+      claimed from Screenlet Studio's Dispositivos panel — no code typed)
+- [x] `sync.Client` / `sync.Poller` implementing `Syncer`: polls Studio for
+      `ChannelAssignment` and triggers `playback.Player.Play` on change —
+      no restart required
+- [x] `telemetry.HTTPReporter` implementing `Reporter`: periodic heartbeat
+      to Studio, doubling as the pairing announce
+- [x] Studio-side: `/api/player/{sync,heartbeat}` routes on the existing
+      IPTV server (port 7095) + Dispositivos panel section listing
+      detected/paired Screenlet Player devices (Kodi devices keep the
+      existing SSH-based flow, unaffected)
+- [ ] Studio's online/offline indicator for Player devices (heartbeat data
+      is there; panel currently shows it but hasn't been tuned for a
+      specific staleness threshold)
 
 ## v0.5.0 — Self-update
 

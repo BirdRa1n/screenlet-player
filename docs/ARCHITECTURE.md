@@ -55,9 +55,25 @@ manages a Kodi device today, minus SSH:
 | POST   | `/play`   | `{"source": "<url>"}` — switch playback   |
 | POST   | `/stop`   | Halt playback                             |
 
-This will grow to cover pairing and forced re-sync as those land (see
-`docs/ROADMAP.md`), but deliberately stays smaller than Kodi's full
-JSON-RPC surface — the player only needs to do one job.
+This deliberately stays smaller than Kodi's full JSON-RPC surface — the
+player only needs to do one job. It's not where pairing/sync live, though:
+those are calls the player makes *outward* to Studio, not endpoints Studio
+calls on the player. See the next section.
+
+## Talking to Screenlet Studio
+
+Pairing, sync and telemetry (`internal/sync`, `internal/telemetry`) are
+all client-side: the player calls out to routes Screenlet Studio's
+existing IPTV server (port 7095, the same one serving `playlist.m3u`)
+exposes — no inbound connection to the player is needed for any of this.
+
+| Method | Path                                | Called by         | Purpose                                  |
+| ------ | ----------------------------------- | ------------------ | ----------------------------------------- |
+| POST   | `/api/player/heartbeat`             | `telemetry.HTTPReporter` | Health ping; also how Studio first learns a device exists |
+| GET    | `/api/player/sync?deviceId=...`     | `sync.Client`       | Fetch this device's channel assignment, once paired |
+
+Full flow, including how an admin claims a device, is in
+`docs/PAIRING.md`.
 
 ## Why mpv (planned), not a bundled media center
 

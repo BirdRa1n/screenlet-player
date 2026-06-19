@@ -47,3 +47,43 @@ func newID() (string, error) {
 	}
 	return hex.EncodeToString(buf), nil
 }
+
+// pairingAlphabet excludes 0/O and 1/I so codes are unambiguous when read
+// off a log or, eventually, displayed on screen.
+const pairingAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// PairingCode returns this device's persisted human-readable pairing code,
+// generating and saving a new one on first call. An admin types this code
+// into Screenlet Studio's Dispositivos panel to claim the device — see
+// docs/PAIRING.md.
+func PairingCode() (string, error) {
+	cfg, err := storage.Load()
+	if err != nil {
+		return "", err
+	}
+
+	if cfg.PairingCode == "" {
+		code, err := newPairingCode()
+		if err != nil {
+			return "", err
+		}
+		cfg.PairingCode = code
+		if err := storage.Save(cfg); err != nil {
+			return "", err
+		}
+	}
+
+	return cfg.PairingCode, nil
+}
+
+func newPairingCode() (string, error) {
+	buf := make([]byte, 5)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	code := make([]byte, len(buf))
+	for i, b := range buf {
+		code[i] = pairingAlphabet[int(b)%len(pairingAlphabet)]
+	}
+	return string(code), nil
+}
