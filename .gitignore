@@ -1,0 +1,20 @@
+# Build artifacts
+/dist/
+/bin/
+screenlet-player
+screenlet-player-*
+
+# Go
+*.test
+*.out
+go.work
+go.work.sum
+
+# Local config (mirrors ~/.config/screenlet-player when run from repo root)
+config.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

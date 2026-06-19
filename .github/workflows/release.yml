@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            name: linux-amd64
+          - goos: linux
+            goarch: arm64
+            name: linux-arm64
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            name: linux-armv7
+          - goos: darwin
+            goarch: arm64
+            name: darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-X github.com/BirdRa1n/screenlet-player/pkg/version.Version=${VERSION}"
+          LDFLAGS="${LDFLAGS} -X github.com/BirdRa1n/screenlet-player/pkg/version.Commit=${COMMIT}"
+          LDFLAGS="${LDFLAGS} -X github.com/BirdRa1n/screenlet-player/pkg/version.BuildDate=${BUILD_DATE}"
+          BIN="dist/screenlet-player-${{ matrix.name }}"
+          go build -trimpath -ldflags "${LDFLAGS}" -o "${BIN}" ./cmd/screenlet-player
+          ( cd dist && sha256sum "screenlet-player-${{ matrix.name }}" > "screenlet-player-${{ matrix.name }}.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenlet-player-${{ matrix.name }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find dist -type f -exec cp {} release/ \;
+          ls -la release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
