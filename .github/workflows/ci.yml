@@ -14,7 +14,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-          cache: true
+          # No go.sum yet (zero external deps) — caching has nothing to key off.
+          cache: false
 
       - name: Check formatting (go fmt)
         run: |
