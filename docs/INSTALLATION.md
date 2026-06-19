@@ -28,23 +28,16 @@ Pre-built binaries are published for every tagged release:
 
 Alternatively, run [`scripts/install.sh`](../scripts/install.sh), which
 detects your OS/arch and fetches the right binary from the GitHub Releases
-API automatically:
+API automatically — this is the one-line installer for now, since
+`player.screenlet.app` doesn't exist yet:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/BirdRa1n/screenlet-player/main/scripts/install.sh | bash
 ```
 
-## Planned: one-line installer
-
-Once `player.screenlet.app` is live, installation will be:
-
-```bash
-curl -fsSL https://player.screenlet.app/install.sh | bash
-```
-
-This will be a thin redirect to the same logic as `scripts/install.sh` —
-not a separate implementation — so behavior stays identical. Tracked in
-`docs/ROADMAP.md`.
+Once that domain is live, `player.screenlet.app/install.sh` will be a
+thin redirect to this same script — not a separate implementation — so
+behavior stays identical. Tracked in `docs/ROADMAP.md`.
 
 ## Install mpv
 

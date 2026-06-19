@@ -53,14 +53,15 @@ Pre-built binaries are published on the
 `linux-amd64`, `linux-arm64`, `linux-armv7` and `darwin-arm64`.
 
 ```bash
-# planned, once player.screenlet.app is live — see docs/ROADMAP.md
-curl -fsSL https://player.screenlet.app/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/BirdRa1n/screenlet-player/main/scripts/install.sh | bash
 ```
 
-Until then, download the binary for your platform from the latest release,
-or use [`scripts/install.sh`](scripts/install.sh), which fetches it directly
-from the GitHub Releases API. Full instructions, including running as a
-systemd service, are in [docs/INSTALLATION.md](docs/INSTALLATION.md).
+This detects your OS/arch and fetches the right binary from the GitHub
+Releases API. A short `player.screenlet.app/install.sh` redirect is
+planned once that domain exists (see `docs/ROADMAP.md`) but isn't a
+separate implementation — it'll just point here. Full instructions,
+including running as a systemd service, are in
+[docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 ## Development (macOS)
 
