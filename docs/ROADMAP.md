@@ -83,9 +83,14 @@ for the full design.
       `apt-get`/`dnf`/`pacman` install and failing with clear manual
       instructions if that doesn't work — no more silently falling back
       to `NoopPlayer` in production because mpv was never installed
-- [ ] Screenlet Studio: network scan (`/identify` sweep) as a second
+- [x] Screenlet Studio: network scan (`/identify` sweep) as a second
       discovery path alongside heartbeat, and a real `/claim` call from
-      the claim dialog instead of only updating Studio's local list
+      the claim dialog instead of only updating Studio's local list.
+      Heartbeat handling also now captures the device's source IP, so
+      heartbeat-discovered devices get a reachable address too. Verified
+      live: real claim handshake, `safeStorage` encrypt/decrypt
+      round-trip, and an authenticated `/status` call all run against a
+      real `screenlet-player` binary from a standalone Electron process.
 
 Verified live: claimed a freshly built binary over its real HTTP API end
 to end — `/identify` before and after, `/status`/`/play`/`/stop` reject
