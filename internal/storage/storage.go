@@ -17,6 +17,11 @@ type Config struct {
 	StudioURL   string `json:"studioUrl,omitempty"`
 	PairingCode string `json:"pairingCode,omitempty"`
 	ChannelID   string `json:"channelId,omitempty"`
+	// APIToken gates the local control API (internal/api). Empty means
+	// unclaimed: only /identify and /claim are reachable. Set once, by the
+	// first successful /claim call, and never rotated except via a full
+	// Reset() — see docs/PAIRING.md.
+	APIToken string `json:"apiToken,omitempty"`
 }
 
 // Dir returns the directory used to persist player state, creating it if

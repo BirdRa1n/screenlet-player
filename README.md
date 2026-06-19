@@ -77,13 +77,21 @@ go vet ./...
 go test ./...
 ```
 
-With the binary running, exercise the control API directly:
+With the binary running, `/status`/`/play`/`/stop` require a bearer
+token — claim the device first (`/identify` and `/claim` are the only
+unauthenticated routes; see [docs/PAIRING.md](docs/PAIRING.md)):
 
 ```bash
-curl localhost:8089/status
-curl -X POST localhost:8089/play -d '{"source":"http://example.com/a.m3u"}'
-curl -X POST localhost:8089/stop
+curl localhost:8089/identify
+TOKEN=$(curl -s -X POST localhost:8089/claim -d '{}' | sed -E 's/.*"token":"([^"]+)".*/\1/')
+
+curl -H "Authorization: Bearer $TOKEN" localhost:8089/status
+curl -H "Authorization: Bearer $TOKEN" -X POST localhost:8089/play -d '{"source":"http://example.com/a.m3u"}'
+curl -H "Authorization: Bearer $TOKEN" -X POST localhost:8089/stop
 ```
+
+A device can only be claimed once — run `screenlet-player -reset` to
+undo it locally and try again.
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full local dev
 workflow and project conventions.

@@ -4,7 +4,7 @@ Versioning follows [SemVer](https://semver.org/). Pre-1.0, minor bumps
 (`v0.x.0`) may include breaking changes to the local config format or
 control API — there are no compatibility guarantees yet.
 
-## v0.1.0 — Scaffold (current)
+## v0.1.0 — Scaffold
 
 - [x] Repository structure (`cmd/`, `internal/*`, `pkg/`, `docs/`, `scripts/`)
 - [x] Device identity, persisted locally (`internal/device`, `internal/storage`)
@@ -60,7 +60,47 @@ Verified end-to-end against a real Screenlet Studio instance (not just
 up unprompted in the Dispositivos panel, was claimed via the UI, and
 picked up the assigned channel's playlist URL on its next sync tick.
 
-## v0.5.0 — Self-update
+## v0.5.0 — Authenticated control API, claim flow, reset
+
+Closes the gap flagged in a security review: before this, `internal/api`
+had no authentication at all, and pairing relied solely on Studio
+already knowing a device's address via heartbeat. See `docs/PAIRING.md`
+for the full design.
+
+- [x] `internal/api`: `/status`, `/play`, `/stop` all require a bearer
+      token, compared in constant time; unauthenticated until claimed
+- [x] `/identify` (always open, minimal — no secrets) and `/claim`
+      (single-shot; `409` on a second attempt) added to `internal/api`
+- [x] `internal/device.GenerateAPIToken`/`Reset`: claiming mints a token
+      via `crypto/rand`; `screenlet-player -reset` is the only way to
+      undo a claim, requires local/SSH access by design
+- [x] `/play` validates `source` is an `http(s)://` URL, rejecting
+      `file://` and other schemes
+- [x] `internal/playback/mpv.go`: IPC socket now lives in a fresh,
+      exclusively-owned `0700` temp directory instead of a predictable
+      path directly under the shared `os.TempDir()` (closes a TOCTOU gap)
+- [x] `scripts/install.sh`: requires mpv on Linux, attempting
+      `apt-get`/`dnf`/`pacman` install and failing with clear manual
+      instructions if that doesn't work — no more silently falling back
+      to `NoopPlayer` in production because mpv was never installed
+- [ ] Screenlet Studio: network scan (`/identify` sweep) as a second
+      discovery path alongside heartbeat, and a real `/claim` call from
+      the claim dialog instead of only updating Studio's local list
+
+Verified live: claimed a freshly built binary over its real HTTP API end
+to end — `/identify` before and after, `/status`/`/play`/`/stop` reject
+no-token and wrong-token requests, accept the token `/claim` returned,
+`/play` rejects `file://` and accepts a real `http://` URL with `position`
+advancing, a second `/claim` gets `409`, and `-reset` followed by a fresh
+boot produces a new device ID with `claimed:false` again.
+
+**Known residual risk, accepted for now:** all of the above runs over
+plain HTTP, including the token itself during the claim handshake — see
+`docs/PAIRING.md`'s security model section. TLS would close this but
+needs a cert strategy (self-signed + pinning) on both sides; deferred
+rather than silently dropped.
+
+## v0.6.0 — Self-update
 
 - [ ] `updater.Checker` implementation against the GitHub Releases API
 - [ ] In-place binary replacement + restart on new version

@@ -42,16 +42,20 @@ behavior stays identical. Tracked in `docs/ROADMAP.md`.
 ## Install mpv
 
 Real playback is backed by [mpv](https://mpv.io) over its JSON IPC
-socket (`internal/playback/mpv.go`) — install it on the device before
-starting the service:
+socket (`internal/playback/mpv.go`). `scripts/install.sh` requires it on
+Linux — it tries to install mpv via `apt-get`/`dnf`/`pacman` itself and
+aborts with manual instructions if that doesn't work, rather than
+letting you discover it's missing only once the service is already
+running with nothing on screen. To install it yourself:
 
 ```bash
 sudo apt install mpv   # Debian/Raspberry Pi OS
 ```
 
-If mpv isn't found on `PATH`, Screenlet Player logs a warning and falls
-back to a no-op backend: the control API and Studio pairing/sync still
-work, but nothing renders. Use `-mpv-bin` / `-mpv-args` (see
+If you run the `screenlet-player` binary directly (bypassing
+`install.sh`) and mpv isn't on `PATH`, it logs a warning and falls back
+to a no-op backend: the control API and Studio pairing/sync still work,
+but nothing renders. Use `-mpv-bin` / `-mpv-args` (see
 `screenlet-player -h`) to point at a non-default mpv binary or pass
 hardware-specific flags such as `--vo=drm` on a Raspberry Pi.
 
@@ -93,3 +97,20 @@ over the display directly in fullscreen once a channel is assigned.
 Raspberry Pi hardware-accelerated output (`--vo=drm` or similar via
 `-mpv-args`) hasn't been smoke-tested on real hardware yet — see
 `docs/ROADMAP.md`.
+
+## Releasing a device for re-pairing
+
+A claimed device only answers to the Screenlet Studio instance that
+claimed it (see `docs/PAIRING.md`). There's no remote/network way to
+undo that on purpose. To free a device — decommissioning it, moving it
+to a different Studio install — you need local or SSH access:
+
+```bash
+sudo systemctl stop screenlet-player   # if running as a service
+screenlet-player -reset
+sudo systemctl start screenlet-player
+```
+
+This wipes the device's identity, pairing code, API token and channel
+assignment. On the next start it generates a fresh device ID and
+pairing code, and is discoverable/claimable again as if new.

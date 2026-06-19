@@ -27,9 +27,9 @@ type MPVOptions struct {
 // player only ever sends it loadfile/stop commands, so switching channels
 // never requires a restart (unlike the Kodi+SSH bridge it replaces).
 type MPVPlayer struct {
-	cmd        *exec.Cmd
-	socketPath string
-	stderr     *cappedBuffer
+	cmd       *exec.Cmd
+	socketDir string // removed wholesale on Close
+	stderr    *cappedBuffer
 
 	mu      sync.Mutex
 	conn    net.Conn
@@ -66,8 +66,15 @@ func NewMPVPlayer(opts MPVOptions) (*MPVPlayer, error) {
 		return nil, fmt.Errorf("mpv: %q not found in PATH: %w", bin, err)
 	}
 
-	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("screenlet-player-mpv-%d-%d.sock", os.Getpid(), time.Now().UnixNano()))
-	os.Remove(sockPath) // stale socket from a previous crashed run
+	// A fresh, exclusively-owned 0700 directory (not a predictable path
+	// directly under the shared, world-writable os.TempDir()) closes the
+	// TOCTOU window a local attacker would otherwise have between removing
+	// any stale socket and mpv creating the real one.
+	sockDir, err := os.MkdirTemp("", "screenlet-player-mpv-*")
+	if err != nil {
+		return nil, fmt.Errorf("mpv: failed to create socket directory: %w", err)
+	}
+	sockPath := filepath.Join(sockDir, "mpv.sock")
 
 	args := append([]string{
 		"--idle=yes",
@@ -82,6 +89,7 @@ func NewMPVPlayer(opts MPVOptions) (*MPVPlayer, error) {
 	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
+		os.RemoveAll(sockDir)
 		return nil, fmt.Errorf("mpv: failed to start: %w", err)
 	}
 
@@ -89,7 +97,7 @@ func NewMPVPlayer(opts MPVOptions) (*MPVPlayer, error) {
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		os.Remove(sockPath)
+		os.RemoveAll(sockDir)
 		if log := stderr.String(); log != "" {
 			return nil, fmt.Errorf("mpv: failed to connect to IPC socket: %w (stderr: %s)", err, log)
 		}
@@ -97,11 +105,11 @@ func NewMPVPlayer(opts MPVOptions) (*MPVPlayer, error) {
 	}
 
 	p := &MPVPlayer{
-		cmd:        cmd,
-		socketPath: sockPath,
-		stderr:     stderr,
-		conn:       conn,
-		pending:    make(map[int64]chan mpvResponse),
+		cmd:       cmd,
+		socketDir: sockDir,
+		stderr:    stderr,
+		conn:      conn,
+		pending:   make(map[int64]chan mpvResponse),
 	}
 	go p.readLoop(conn)
 	return p, nil
@@ -255,7 +263,7 @@ func (p *MPVPlayer) Close() error {
 		_ = p.cmd.Process.Kill()
 		_ = p.cmd.Wait()
 	}
-	os.Remove(p.socketPath)
+	os.RemoveAll(p.socketDir)
 	return nil
 }
 

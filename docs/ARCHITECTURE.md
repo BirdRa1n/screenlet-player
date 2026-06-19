@@ -47,25 +47,33 @@ independently testable, which is why `go test ./...` already exercises
 
 The local HTTP API is intentionally small. It exists so Studio's
 Dispositivos panel can manage a Screenlet Player device the same way it
-manages a Kodi device today, minus SSH:
+manages a Kodi device today, minus SSH — and, since v0.5.0, it's how a
+device is actually claimed, not just controlled:
 
-| Method | Path      | Purpose                                  |
-| ------ | --------- | ----------------------------------------- |
-| GET    | `/status` | Current playback state (playing, source) |
-| POST   | `/play`   | `{"source": "<url>"}` — switch playback   |
-| POST   | `/stop`   | Halt playback                             |
+| Method | Path        | Auth                  | Purpose                                       |
+| ------ | ----------- | ---------------------- | ---------------------------------------------- |
+| GET    | `/identify` | none                   | `{deviceId, hostname, playerVersion, claimed}` — discovery |
+| POST   | `/claim`    | none (single-shot)     | `{"studioUrl": "..."}` (optional) → mints and returns a bearer token; `409` once already claimed |
+| GET    | `/status`   | `Bearer <token>`       | Current playback state (playing, source)       |
+| POST   | `/play`     | `Bearer <token>`       | `{"source": "http(s)://..."}` — switch playback |
+| POST   | `/stop`     | `Bearer <token>`       | Halt playback                                  |
 
 This deliberately stays smaller than Kodi's full JSON-RPC surface — the
-player only needs to do one job. It's not where pairing/sync live, though:
-those are calls the player makes *outward* to Studio, not endpoints Studio
-calls on the player. See the next section.
+player only needs to do one job. `/identify` and `/claim` are the one
+place Studio calls *inbound* into the player; everything else
+pairing/sync-related is still the player calling *outward* to Studio —
+see the next section and `docs/PAIRING.md` for the full claim flow and
+security model.
 
 ## Talking to Screenlet Studio
 
-Pairing, sync and telemetry (`internal/sync`, `internal/telemetry`) are
-all client-side: the player calls out to routes Screenlet Studio's
+Sync and telemetry (`internal/sync`, `internal/telemetry`) are
+client-side: the player calls out to routes Screenlet Studio's
 existing IPTV server (port 7095, the same one serving `playlist.m3u`)
-exposes — no inbound connection to the player is needed for any of this.
+exposes. This is independent of the Control API above — a device can be
+discovered and claimed via network scan without ever having been told
+where Studio is; only sync/telemetry need that URL, learned either from
+`-studio-url` or from the claim request itself.
 
 | Method | Path                                | Called by         | Purpose                                  |
 | ------ | ----------------------------------- | ------------------ | ----------------------------------------- |

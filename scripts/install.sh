@@ -32,6 +32,36 @@ if [ "$goos" = "darwin" ] && [ "$goarch" != "arm64" ]; then
   exit 1
 fi
 
+# Real playback is backed by mpv (internal/playback/mpv.go). On Linux —
+# the actual signage target — this is required, not optional: without it
+# the player silently falls back to rendering nothing. On macOS (dev-only
+# target) it's just a suggestion.
+if [ "$goos" = "linux" ] && ! command -v mpv >/dev/null 2>&1; then
+  echo "==> mpv not found — required for playback on Linux, attempting to install it"
+  as_root() {
+    if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
+  }
+  if command -v apt-get >/dev/null 2>&1; then
+    as_root apt-get update -qq && as_root apt-get install -y mpv
+  elif command -v dnf >/dev/null 2>&1; then
+    as_root dnf install -y mpv
+  elif command -v pacman >/dev/null 2>&1; then
+    as_root pacman -Sy --noconfirm mpv
+  fi
+
+  if ! command -v mpv >/dev/null 2>&1; then
+    echo "error: mpv is required on Linux and could not be installed automatically." >&2
+    echo "Install it manually for your distro, then re-run this script:" >&2
+    echo "  sudo apt-get install mpv     # Debian / Raspberry Pi OS / Ubuntu" >&2
+    echo "  sudo dnf install mpv         # Fedora" >&2
+    echo "  sudo pacman -S mpv           # Arch" >&2
+    exit 1
+  fi
+  echo "==> mpv installed"
+elif [ "$goos" = "darwin" ] && ! command -v mpv >/dev/null 2>&1; then
+  echo "==> mpv not found. Not required on macOS (dev-only target), but 'brew install mpv' lets you test real playback locally."
+fi
+
 asset="screenlet-player-${goos}-${goarch}"
 echo "==> Detected platform: ${goos}-${goarch}"
 

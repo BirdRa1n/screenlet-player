@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os/signal"
 	"strings"
+	stdsync "sync"
 	"syscall"
 	"time"
 
@@ -29,8 +30,9 @@ const (
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
+	reset := flag.Bool("reset", false, "wipe all local pairing state (device identity, API token, channel) so this device can be claimed by a different Screenlet Studio instance — requires local/SSH access, exits without starting the player")
 	addr := flag.String("addr", ":8089", "address for the local control API")
-	studioURL := flag.String("studio-url", "", "Screenlet Studio base URL, e.g. http://192.168.1.10:7095 (enables pairing + sync)")
+	studioURL := flag.String("studio-url", "", "Screenlet Studio base URL, e.g. http://192.168.1.10:7095 (enables pairing + sync; not required if the device will be claimed via network scan instead)")
 	mpvBin := flag.String("mpv-bin", "mpv", "mpv executable to use for playback")
 	mpvArgs := flag.String("mpv-args", "", "extra space-separated arguments appended to the mpv invocation, e.g. \"--vo=drm\" on a Raspberry Pi")
 	flag.Parse()
@@ -40,18 +42,63 @@ func main() {
 		return
 	}
 
+	if *reset {
+		if err := device.Reset(); err != nil {
+			log.Fatalf("screenlet-player: reset failed: %v", err)
+		}
+		fmt.Println("screenlet-player: local state wiped. This device is unclaimed again — it will generate a new identity and pairing code on next start.")
+		return
+	}
+
 	id, err := device.LoadOrCreate()
 	if err != nil {
 		log.Fatalf("screenlet-player: failed to load device identity: %v", err)
 	}
 	log.Printf("screenlet-player %s starting — device %s (%s)", version.Version, id.ID, id.Hostname)
 
+	token, err := device.APIToken()
+	if err != nil {
+		log.Fatalf("screenlet-player: failed to load API token: %v", err)
+	}
+	if code, err := device.PairingCode(); err == nil {
+		log.Printf("pairing code: %s — shown in Screenlet Studio's Dispositivos panel if discovered via heartbeat", code)
+	}
+
 	player := newPlayer(*mpvBin, *mpvArgs)
 	defer player.Close()
-	apiSrv := api.New(player)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	var integrationOnce stdsync.Once
+	startIntegration := func(url string) {
+		if url == "" {
+			return
+		}
+		integrationOnce.Do(func() {
+			go runStudioIntegration(ctx, url, id, player)
+		})
+	}
+
+	apiSrv := api.New(player, api.Options{
+		Info:  api.Info{DeviceID: id.ID, Hostname: id.Hostname, PlayerVersion: version.Version},
+		Token: token,
+		Mint: func(studioURL string) (api.ClaimResult, error) {
+			newToken, err := device.GenerateAPIToken(studioURL)
+			if err != nil {
+				return api.ClaimResult{}, err
+			}
+			code, err := device.PairingCode()
+			if err != nil {
+				return api.ClaimResult{}, err
+			}
+			return api.ClaimResult{Token: newToken, DeviceID: id.ID, PairingCode: code}, nil
+		},
+		OnClaimed: func(_ string, studioURL string) {
+			log.Println("device claimed by Screenlet Studio")
+			startIntegration(studioURL)
+		},
+	})
 
 	go func() {
 		log.Printf("control API listening on %s", *addr)
@@ -60,10 +107,17 @@ func main() {
 		}
 	}()
 
-	if *studioURL == "" {
-		log.Println("no -studio-url provided — running standalone (control API only, no pairing/sync)")
-	} else {
-		go runStudioIntegration(ctx, *studioURL, id, player)
+	switch {
+	case *studioURL != "":
+		startIntegration(*studioURL)
+	case token != "":
+		persistedURL, err := device.StudioURL()
+		if err != nil {
+			log.Printf("failed to load persisted Studio URL: %v", err)
+		}
+		startIntegration(persistedURL)
+	default:
+		log.Println("not claimed yet — waiting to be discovered and claimed by Screenlet Studio (or pass -studio-url)")
 	}
 
 	<-ctx.Done()
@@ -91,15 +145,15 @@ func newPlayer(bin, extraArgs string) playback.Player {
 }
 
 // runStudioIntegration keeps this device paired and in sync with a
-// Screenlet Studio instance: heartbeats announce the device (and later
-// report its health) so it can be claimed in the Dispositivos panel, and
-// the poller picks up channel changes without ever needing a restart.
+// Screenlet Studio instance: heartbeats report health (and, before this
+// device is claimed, are how Studio's heartbeat-based discovery learns it
+// exists) and the poller picks up channel changes without ever needing a
+// restart. Started either at boot (-studio-url or a previously persisted
+// Studio URL) or on demand, the moment a /claim call supplies one.
 func runStudioIntegration(ctx context.Context, studioURL string, id *device.Identity, player playback.Player) {
 	code, err := device.PairingCode()
 	if err != nil {
-		log.Printf("pairing: failed to load pairing code: %v", err)
-	} else {
-		log.Printf("pairing code: %s — open Screenlet Studio > Dispositivos > Screenlet Player to pair this device", code)
+		log.Printf("pairing: failed to load pairing code for telemetry: %v", err)
 	}
 
 	syncClient := sync.NewClient(studioURL, id.ID)

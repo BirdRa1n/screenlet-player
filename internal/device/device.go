@@ -87,3 +87,61 @@ func newPairingCode() (string, error) {
 	}
 	return string(code), nil
 }
+
+// APIToken returns the persisted control-API bearer token, or "" if this
+// device hasn't been claimed yet.
+func APIToken() (string, error) {
+	cfg, err := storage.Load()
+	if err != nil {
+		return "", err
+	}
+	return cfg.APIToken, nil
+}
+
+// StudioURL returns the Screenlet Studio base URL learned via a previous
+// /claim call, or "" if none is persisted (e.g. only -studio-url was ever
+// used, or this device hasn't been claimed yet).
+func StudioURL() (string, error) {
+	cfg, err := storage.Load()
+	if err != nil {
+		return "", err
+	}
+	return cfg.StudioURL, nil
+}
+
+// GenerateAPIToken mints and persists a new control-API bearer token,
+// overwriting any existing one. studioURL is persisted too when non-empty,
+// so a device claimed without -studio-url at boot still knows where to
+// send heartbeats/sync from then on. Called exactly once per claim by
+// internal/api's injected mint function — see docs/PAIRING.md.
+func GenerateAPIToken(studioURL string) (string, error) {
+	cfg, err := storage.Load()
+	if err != nil {
+		return "", err
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(buf)
+
+	cfg.APIToken = token
+	if studioURL != "" {
+		cfg.StudioURL = studioURL
+	}
+	if err := storage.Save(cfg); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// Reset wipes all persisted local state — device identity, pairing code,
+// API token, studio URL, channel — so this device becomes unclaimed again
+// and can be paired with a different Screenlet Studio instance. Intended
+// to be reachable only via local/SSH access to the machine (the cmd's
+// -reset flag), never over the network: it is the only way to undo a
+// claim, by design.
+func Reset() error {
+	return storage.Save(&storage.Config{})
+}
