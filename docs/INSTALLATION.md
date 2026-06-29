@@ -111,6 +111,7 @@ screenlet-player -reset
 sudo systemctl start screenlet-player
 ```
 
-This wipes the device's identity, pairing code, API token and channel
-assignment. On the next start it generates a fresh device ID and
-pairing code, and is discoverable/claimable again as if new.
+This wipes the device's identity, pairing code, API token, channel
+assignment and the local media cache. On the next start it generates a
+fresh device ID and pairing code, and is discoverable/claimable again as
+if new.

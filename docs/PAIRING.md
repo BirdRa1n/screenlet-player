@@ -56,9 +56,16 @@ channel choice":
 6. **Sync**, independent of all of the above: the player polls
    `GET {studioURL}/api/player/sync?deviceId=...` every 15s
    (`internal/sync.Poller`), which replies with the assigned channel
-   once one exists. Updating a channel's playlist in Studio reaches the
-   device on its next sync tick automatically — no restart required,
-   unlike the Kodi bridge.
+   once one exists. The reply carries an offline **manifest** — the
+   ordered assets (filename, download URL, byte size, `sha256` hash,
+   transition) plus a `version` digest of the whole list. The player
+   downloads and verifies those into its local cache (`internal/media`)
+   and plays them from disk, so a reboot with no reachable server still
+   shows the last channel. Change detection keys on `version`, so an
+   in-place re-render (same filename, new bytes) is still picked up.
+   Updating a channel in Studio reaches the device on its next sync tick
+   automatically — no restart required, unlike the Kodi bridge. The
+   legacy `playlistUrl` live stream remains as a fallback.
 
 ## Security model
 

@@ -2,12 +2,14 @@
 
 Lightweight digital signage player for Linux. Screenlet Player pairs with a
 [Screenlet Studio](https://github.com/BirdRa1n/AdFrame) instance, syncs its
-assigned channel, and plays it back fullscreen on the device it's installed
-on — no Kodi, no media-center menus, no SSH bridge required.
+assigned channel, caches the channel's media locally, and plays it back
+fullscreen — no Kodi, no media-center menus, no SSH bridge required.
 
-> **Status:** early scaffold. The control API and project layout are in
-> place; pairing, sync, telemetry and the real playback backend are not
-> implemented yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status:** functional. Pairing, channel sync, telemetry and the
+> mpv-backed playback engine are implemented, along with an authenticated
+> control/claim API and (since v0.5.5) offline-first playback: a device keeps
+> looping its last channel after a reboot even with no reachable server.
+> See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Why
 
@@ -27,6 +29,7 @@ cmd/screenlet-player     entry point — wires everything together
 internal/
   api                    local HTTP control API (status, play, stop)
   device                 stable device identity, persisted across restarts
+  media                  local asset cache + offline playback manifest
   display                output mode detection (resolution, fullscreen)
   playback               Player interface; MPVPlayer (mpv IPC) + NoopPlayer fallback
   sync                    polls Screenlet Studio for the device's channel
@@ -37,7 +40,8 @@ pkg/version              build-time version metadata (-ldflags)
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how these pieces fit
-together and how the player is meant to talk to Screenlet Studio.
+together — including the **offline-first playback** model (cache, manifest,
+boot-from-cache) — and how the player talks to Screenlet Studio.
 
 ## Requirements
 
