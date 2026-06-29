@@ -18,6 +18,11 @@ type Status struct {
 type Player interface {
 	// Play starts (or switches to) playing the given source URL.
 	Play(source string) error
+	// PlayPlaylist starts (or switches to) playing an ordered list of local
+	// files, looping the whole list when loop is true. This is the offline
+	// signage path: the files are served from the device's own media cache,
+	// so playback continues across reboots without a reachable server.
+	PlayPlaylist(paths []string, loop bool) error
 	// Stop halts playback and releases the display.
 	Stop() error
 	// Status reports the current playback state.
@@ -42,6 +47,15 @@ func NewNoopPlayer() *NoopPlayer {
 
 func (p *NoopPlayer) Play(source string) error {
 	p.status = Status{Playing: true, Source: source}
+	return nil
+}
+
+func (p *NoopPlayer) PlayPlaylist(paths []string, _ bool) error {
+	src := ""
+	if len(paths) > 0 {
+		src = paths[0]
+	}
+	p.status = Status{Playing: src != "", Source: src}
 	return nil
 }
 

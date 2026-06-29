@@ -11,13 +11,40 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/BirdRa1n/screenlet-player/internal/media"
 )
 
-// ChannelAssignment is what Screenlet Studio tells a device to play.
+// ChannelAssignment is what Screenlet Studio tells a device to play. Items and
+// Version come from Studio's offline manifest; PlaylistURL is the legacy
+// live-stream URL kept as a fallback for servers (or channels) that advertise
+// no downloadable items.
 type ChannelAssignment struct {
-	ChannelID   string    `json:"channelId"`
-	PlaylistURL string    `json:"playlistUrl"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ChannelID   string       `json:"channelId"`
+	PlaylistURL string       `json:"playlistUrl"`
+	UpdatedAt   time.Time    `json:"updatedAt"`
+	Loop        bool         `json:"loop"`
+	Version     string       `json:"version"`
+	Items       []media.Item `json:"items"`
+}
+
+// HasItems reports whether Studio advertised a downloadable, cacheable
+// manifest (vs. only the legacy live-stream URL).
+func (a ChannelAssignment) HasItems() bool { return len(a.Items) > 0 }
+
+// Manifest converts the assignment into a media.Manifest for the cache.
+func (a ChannelAssignment) Manifest() media.Manifest {
+	return media.Manifest{ChannelID: a.ChannelID, Version: a.Version, Loop: a.Loop, Items: a.Items}
+}
+
+// changeKey is a comparable digest of the assignment used to detect changes.
+// It keys on the content version when present (so an in-place re-render with
+// the same filename is still noticed) and otherwise on the legacy fields.
+func (a ChannelAssignment) changeKey() string {
+	if a.Version != "" {
+		return a.ChannelID + "@" + a.Version
+	}
+	return a.ChannelID + "|" + a.PlaylistURL + "|" + a.UpdatedAt.String()
 }
 
 // Syncer periodically polls Screenlet Studio for the device's current
@@ -33,10 +60,13 @@ type Syncer interface {
 // Paired is false until an admin claims this device's pairing code in the
 // Dispositivos panel — see docs/PAIRING.md.
 type syncResponse struct {
-	Paired      bool      `json:"paired"`
-	ChannelID   string    `json:"channelId"`
-	PlaylistURL string    `json:"playlistUrl"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	Paired      bool         `json:"paired"`
+	ChannelID   string       `json:"channelId"`
+	PlaylistURL string       `json:"playlistUrl"`
+	UpdatedAt   time.Time    `json:"updatedAt"`
+	Loop        bool         `json:"loop"`
+	Version     string       `json:"version"`
+	Items       []media.Item `json:"items"`
 }
 
 // Client talks to a Screenlet Studio instance over HTTP on behalf of one
@@ -81,7 +111,14 @@ func (c *Client) Fetch(ctx context.Context) (assignment ChannelAssignment, paire
 	if !body.Paired {
 		return ChannelAssignment{}, false, nil
 	}
-	return ChannelAssignment{ChannelID: body.ChannelID, PlaylistURL: body.PlaylistURL, UpdatedAt: body.UpdatedAt}, true, nil
+	return ChannelAssignment{
+		ChannelID:   body.ChannelID,
+		PlaylistURL: body.PlaylistURL,
+		UpdatedAt:   body.UpdatedAt,
+		Loop:        body.Loop,
+		Version:     body.Version,
+		Items:       body.Items,
+	}, true, nil
 }
 
 // Poller implements Syncer by polling a Client on a fixed interval.
@@ -101,7 +138,8 @@ func NewPoller(client *Client) *Poller {
 func (p *Poller) Start(interval time.Duration, onChange func(ChannelAssignment)) error {
 	p.stop = make(chan struct{})
 
-	var last ChannelAssignment
+	var lastKey string
+	var haveLast bool
 	check := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), interval/2)
 		defer cancel()
@@ -110,9 +148,12 @@ func (p *Poller) Start(interval time.Duration, onChange func(ChannelAssignment))
 			log.Printf("sync: %v", err)
 			return
 		}
-		if paired && assignment != last {
-			last = assignment
-			onChange(assignment)
+		if paired {
+			if key := assignment.changeKey(); !haveLast || key != lastKey {
+				lastKey = key
+				haveLast = true
+				onChange(assignment)
+			}
 		}
 	}
 

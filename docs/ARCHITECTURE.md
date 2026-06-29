@@ -15,11 +15,38 @@ Screenlet Player removes that bridge. It is a single static binary that:
 
 1. Generates and persists a stable device identity on first run.
 2. Pairs with a Screenlet Studio instance (planned — see `docs/PAIRING.md`).
-3. Polls Studio for its assigned channel and plays it back fullscreen.
+3. Polls Studio for its assigned channel, caches the channel's assets
+   locally, and plays them back fullscreen.
 4. Reports health back to Studio so the Dispositivos panel can show
    online/offline state without SSH.
 5. Exposes a small local HTTP API so Studio (or an admin) can control
    playback directly, instead of through Kodi's JSON-RPC surface.
+
+## Offline-first playback
+
+The device must keep a screen filled even after a reboot with no reachable
+server — a signage panel that goes black because Studio happens to be off is
+a failure. So the player does not stream from Studio's live IPTV endpoint as
+its primary path. Instead, each time Studio reports a channel it returns a
+**manifest**: the ordered assets with a download URL, byte size and SHA-256
+hash for each, plus a short `version` digest of the whole list.
+
+`internal/media` downloads those assets into a persistent on-disk cache
+(under the player's config dir, never `/tmp`), verifies each against its
+hash, and records the manifest. Playback then runs from the **local files**,
+looping the list. On boot the player loads the persisted manifest and starts
+playing from cache *before any network contact*; the background sync only
+downloads what the `version`/hash says actually changed and hot-swaps the
+playlist. If Studio is never reachable, the device keeps looping the last
+cached programming indefinitely.
+
+Safety properties that matter here: downloads are written to a temp file,
+fsynced, hash-verified and only then atomically renamed into place (a crash
+or power cut can never leave a truncated file the player would try to play);
+filenames from the server are strictly validated to prevent path traversal;
+and the read at download time is capped at the declared size so a server
+can't fill the disk. The legacy live-stream URL is still accepted as a
+fallback for channels (or older Studio builds) that advertise no manifest.
 
 ## Component map
 
@@ -27,6 +54,7 @@ Screenlet Player removes that bridge. It is a single static binary that:
 cmd/screenlet-player     entry point — wires the pieces below together
 internal/storage         local JSON config: device ID, pairing, channel
 internal/device          stable device identity (built on storage)
+internal/media           local asset cache + offline playback manifest
 internal/sync            polls Studio for the device's channel assignment
 internal/playback        Player interface; MPVPlayer (mpv IPC) + NoopPlayer fallback
 internal/display         output mode detection (resolution, fullscreen)

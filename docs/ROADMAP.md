@@ -105,6 +105,33 @@ plain HTTP, including the token itself during the claim handshake — see
 needs a cert strategy (self-signed + pinning) on both sides; deferred
 rather than silently dropped.
 
+## v0.5.5 — Offline-first playback
+
+Closes the "black screen after a reboot with no server" gap: until now the
+player streamed Studio's live IPTV endpoint, so a device that rebooted while
+Studio was offline had nothing to show. Playback now runs from a local,
+verified asset cache and survives with no network. See `docs/ARCHITECTURE.md`
+→ "Offline-first playback".
+
+- [x] `internal/media`: persistent asset cache + manifest. Atomic,
+      fsynced, hash-verified downloads; strict filename validation against
+      path traversal; declared-size cap against disk-fill; GC of assets a
+      channel no longer references
+- [x] `internal/playback`: `PlayPlaylist(paths, loop)` plays an ordered list
+      of local files via an mpv `loadlist`, looping the channel; respawn
+      resumes the playlist, not just a single source
+- [x] Offline-first boot in `cmd`: load the persisted manifest and play from
+      cache *before* any server contact; background sync downloads only what
+      the content `version`/hash changed and hot-swaps the playlist.
+      `-reset` also clears the media cache
+- [x] `internal/sync`: assignment carries the manifest (items + `version`);
+      change detection keys on the content version, so an in-place re-render
+      (same filename, new bytes) is still picked up
+- [x] Studio-side: `/api/player/sync` returns the per-channel manifest
+      (filename, URL, size, `sha256` hash, transition) and the IPTV server
+      gained a Range-capable `/exports/<file>` route for downloads; hashes
+      are cached by size+mtime so large videos aren't re-hashed every poll
+
 ## v0.6.0 — Self-update
 
 - [ ] `updater.Checker` implementation against the GitHub Releases API
