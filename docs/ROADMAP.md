@@ -132,6 +132,25 @@ verified asset cache and survives with no network. See `docs/ARCHITECTURE.md`
       gained a Range-capable `/exports/<file>` route for downloads; hashes
       are cached by size+mtime so large videos aren't re-hashed every poll
 
+## v0.5.6 — Never lose the screen
+
+Field reports against the Qt build of Screenlet Studio: devices dropping
+videos and falling to the Linux console when the PC went away. See
+`docs/ARCHITECTURE.md` → "Offline-first playback".
+
+- [x] mpv keeps a black window when idle (`--force-window`) and holds the
+      last frame at the end of a non-looping playlist (`--keep-open`); no
+      OSC, cursor or default key bindings
+- [x] Idle status screen (IP + pairing code) instead of a blank/console
+- [x] Watchdog reloads content when mpv is idle and reconnects a dropped
+      live stream
+- [x] A new channel version replaces the current one only once fully
+      cached; failed downloads are retried every sync tick
+- [x] Live stream from the PC only when nothing is cached
+- [x] Content-addressed cache (`<sha256>.<ext>`), legacy cache migrated
+- [x] Resumable downloads (`Range`), stall timeout instead of a total one
+- [x] `POST /studio` so the claiming Studio can report a new address
+
 ## v0.6.0 — Self-update
 
 - [ ] `updater.Checker` implementation against the GitHub Releases API
