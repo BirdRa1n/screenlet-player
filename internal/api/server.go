@@ -50,6 +50,10 @@ type Options struct {
 	// start the Studio sync/telemetry goroutines on demand if they weren't
 	// already running (e.g. the device was claimed without -studio-url).
 	OnClaimed func(token, studioURL string)
+	// OnStudioURL runs when the claiming Studio reports a new address of its
+	// own (POST /studio, e.g. the PC's IP changed). It must persist the URL
+	// and point sync/telemetry at it. Optional: without it /studio is 404.
+	OnStudioURL func(studioURL string) error
 }
 
 // Server exposes a small local HTTP API bound to a playback backend.
@@ -58,6 +62,7 @@ type Server struct {
 	info      Info
 	mint      func(studioURL string) (ClaimResult, error)
 	onClaimed func(token, studioURL string)
+	onStudio  func(studioURL string) error
 
 	mu    sync.Mutex
 	token string
@@ -70,6 +75,7 @@ func New(player playback.Player, opts Options) *Server {
 		info:      opts.Info,
 		mint:      opts.Mint,
 		onClaimed: opts.OnClaimed,
+		onStudio:  opts.OnStudioURL,
 		token:     opts.Token,
 	}
 }
@@ -82,6 +88,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/status", s.requireAuth(s.handleStatus))
 	mux.HandleFunc("/play", s.requireAuth(s.handlePlay))
 	mux.HandleFunc("/stop", s.requireAuth(s.handleStop))
+	if s.onStudio != nil {
+		mux.HandleFunc("/studio", s.requireAuth(s.handleStudio))
+	}
 	return mux
 }
 
@@ -224,6 +233,33 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.player.Stop(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleStudio lets the Studio that claimed this device tell it where it is
+// now. Without this, a PC whose IP changed (DHCP lease, another NIC) would
+// strand the device polling a dead address forever — only the token holder
+// can call it, so it can't be used to redirect a device to another server.
+func (s *Server) handleStudio(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		StudioURL string `json:"studioUrl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !isAllowedSource(body.StudioURL) {
+		http.Error(w, "studioUrl must be an http:// or https:// URL", http.StatusBadRequest)
+		return
+	}
+	if err := s.onStudio(strings.TrimRight(body.StudioURL, "/")); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -77,6 +77,12 @@ time (`crypto/subtle.ConstantTimeCompare`) so a timing side-channel
 can't be used to guess it — only the Screenlet Studio instance that
 claimed a device can control it.
 
+If the Studio's own address changes later (DHCP lease, another NIC), the
+device would keep polling a dead URL. Studio fixes that itself: when its
+IPTV server starts, and every minute for paired devices whose heartbeats
+stopped, it calls `POST /studio` with its current address — bearer-token
+authenticated, so only the Studio that claimed a device can redirect it.
+
 Un-claiming is **not** exposed over the network on purpose. The only way
 to free a device for a different Studio instance is local/SSH access
 plus `screenlet-player -reset`, which wipes device identity, pairing

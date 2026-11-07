@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func sha256Hex(b []byte) string {
@@ -62,7 +65,9 @@ func TestSyncDownloadsVerifiesAndPlays(t *testing.T) {
 		t.Fatalf("expected 2 playable paths, got %d", len(paths))
 	}
 	// Order must follow the manifest.
-	if filepath.Base(paths[0]) != "a.mp4" || filepath.Base(paths[1]) != "b.mp4" {
+	wantA, _ := cache.pathFor(m.Items[0])
+	wantB, _ := cache.pathFor(m.Items[1])
+	if paths[0] != wantA || paths[1] != wantB {
 		t.Fatalf("playlist order wrong: %v", paths)
 	}
 
@@ -95,8 +100,8 @@ func TestSyncRejectsHashMismatch(t *testing.T) {
 	if len(paths) != 0 {
 		t.Fatalf("corrupt item must not be playable, got %v", paths)
 	}
-	if _, statErr := os.Stat(filepath.Join(cache.Dir(), "x.mp4")); !os.IsNotExist(statErr) {
-		t.Fatal("a hash-mismatched download must not be committed to the cache")
+	if entries, _ := os.ReadDir(cache.Dir()); len(entries) != 0 {
+		t.Fatalf("a hash-mismatched download must not be committed to the cache, found %v", entries)
 	}
 }
 
@@ -118,8 +123,8 @@ func TestSyncRejectsOversizedBody(t *testing.T) {
 	if _, err := cache.Sync(context.Background(), m); err == nil {
 		t.Fatal("expected a size-mismatch error, got nil")
 	}
-	if _, statErr := os.Stat(filepath.Join(cache.Dir(), "big.mp4")); !os.IsNotExist(statErr) {
-		t.Fatal("an oversized download must not be committed")
+	if entries, _ := os.ReadDir(cache.Dir()); len(entries) != 0 {
+		t.Fatalf("an oversized download must not be committed, found %v", entries)
 	}
 }
 
@@ -161,7 +166,8 @@ func TestGCRemovesUnreferencedFiles(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatal("gc should have removed the unreferenced file")
 	}
-	if _, err := os.Stat(filepath.Join(cache.Dir(), "keep.mp4")); err != nil {
+	keepPath, _ := cache.pathFor(m.Items[0])
+	if _, err := os.Stat(keepPath); err != nil {
 		t.Fatalf("referenced file should remain: %v", err)
 	}
 }
@@ -224,5 +230,137 @@ func TestManifestRoundTripAndClear(t *testing.T) {
 	}
 	if _, err := os.Stat(cache.Dir()); !os.IsNotExist(err) {
 		t.Fatal("media dir should be gone after Clear")
+	}
+}
+
+func TestSyncResumesPartialDownload(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	data := bytes.Repeat([]byte("0123456789"), 1000)
+	var gotRange string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRange = r.Header.Get("Range")
+		http.ServeContent(w, r, "v.mp4", time.Time{}, bytes.NewReader(data))
+	}))
+	defer srv.Close()
+
+	cache, _ := NewCache()
+	item := Item{Filename: "v.mp4", URL: srv.URL + "/exports/v.mp4", Size: int64(len(data)), Hash: sha256Hex(data)}
+	dest, _ := cache.pathFor(item)
+	// A previous attempt got 4000 bytes in before the connection dropped.
+	if err := os.WriteFile(dest+".part", data[:4000], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	paths, err := cache.Sync(context.Background(), &Manifest{Items: []Item{item}})
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("Sync: paths=%v err=%v", paths, err)
+	}
+	if gotRange != "bytes=4000-" {
+		t.Fatalf("expected a resumed Range request, got %q", gotRange)
+	}
+	got, _ := os.ReadFile(dest)
+	if !bytes.Equal(got, data) {
+		t.Fatal("resumed file content differs from the source")
+	}
+	if _, err := os.Stat(dest + ".part"); !os.IsNotExist(err) {
+		t.Fatal(".part file should be gone after commit")
+	}
+}
+
+func TestSyncKeepsCurrentContentWhenUpdateFails(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	old := []byte("old-video")
+	srv := serveFiles(map[string][]byte{"old.mp4": old}) // "new.mp4" will 404
+	defer srv.Close()
+
+	cache, _ := NewCache()
+	current := &Manifest{Version: "v1", Items: []Item{{Filename: "old.mp4", URL: srv.URL + "/exports/old.mp4", Size: int64(len(old)), Hash: sha256Hex(old)}}}
+	if _, err := cache.Sync(context.Background(), current); err != nil {
+		t.Fatalf("initial Sync: %v", err)
+	}
+
+	newBytes := []byte("new-video")
+	next := &Manifest{Version: "v2", Items: []Item{{Filename: "new.mp4", URL: srv.URL + "/exports/new.mp4", Size: int64(len(newBytes)), Hash: sha256Hex(newBytes)}}}
+	if _, err := cache.Sync(context.Background(), next, current); err == nil {
+		t.Fatal("expected the failed download to be reported")
+	}
+	if cache.Complete(next) {
+		t.Fatal("next manifest must not be reported complete")
+	}
+	if got := cache.LocalPlaylist(current); len(got) != 1 {
+		t.Fatal("content on screen was deleted by a failed update")
+	}
+}
+
+func TestInPlaceRerenderGetsItsOwnFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	v1 := []byte("render-1")
+	v2 := []byte("render-2!")
+	files := map[string][]byte{"ad.mp4": v1}
+	srv := serveFiles(files)
+	defer srv.Close()
+
+	cache, _ := NewCache()
+	m1 := &Manifest{Items: []Item{{Filename: "ad.mp4", URL: srv.URL + "/exports/ad.mp4", Size: int64(len(v1)), Hash: sha256Hex(v1)}}}
+	p1, err := cache.Sync(context.Background(), m1)
+	if err != nil {
+		t.Fatalf("Sync v1: %v", err)
+	}
+
+	files["ad.mp4"] = v2 // Studio re-rendered the same filename
+	m2 := &Manifest{Items: []Item{{Filename: "ad.mp4", URL: srv.URL + "/exports/ad.mp4", Size: int64(len(v2)), Hash: sha256Hex(v2)}}}
+	p2, err := cache.Sync(context.Background(), m2, m1)
+	if err != nil {
+		t.Fatalf("Sync v2: %v", err)
+	}
+	if p1[0] == p2[0] {
+		t.Fatal("a re-render must not overwrite the file being played")
+	}
+	if b, _ := os.ReadFile(p1[0]); !bytes.Equal(b, v1) {
+		t.Fatal("old render must stay intact while it may still be on screen")
+	}
+	cache.GC(m2)
+	if _, err := os.Stat(p1[0]); !os.IsNotExist(err) {
+		t.Fatal("old render should be collected once it's off screen")
+	}
+}
+
+func TestAdoptMigratesLegacyFilenameCache(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	cache, _ := NewCache()
+	data := []byte("legacy-bytes")
+	if err := os.WriteFile(filepath.Join(cache.Dir(), "promo.mp4"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := []byte("stale-bytes!")
+	if err := os.WriteFile(filepath.Join(cache.Dir(), "wrong.mp4"), stale, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manifest{Items: []Item{
+		{Filename: "promo.mp4", Size: int64(len(data)), Hash: sha256Hex(data)},
+		// Old layout bug: manifest hash no longer matches the bytes on disk.
+		{Filename: "wrong.mp4", Size: int64(len(stale)), Hash: sha256Hex([]byte("other-bytes!"))},
+	}}
+	cache.Adopt(m)
+	got := cache.LocalPlaylist(m)
+	if len(got) != 1 || !strings.HasPrefix(filepath.Base(got[0]), strings.TrimPrefix(m.Items[0].Hash, "sha256:")) {
+		t.Fatalf("expected only the verified legacy file to be adopted, got %v", got)
+	}
+}
+
+func TestLocalNameRejectsBadInput(t *testing.T) {
+	good := sha256Hex([]byte("x"))
+	if _, err := localName(Item{Filename: "../x.mp4", Hash: good}); err == nil {
+		t.Error("traversal filename must be rejected")
+	}
+	if _, err := localName(Item{Filename: "x.mp4", Hash: "sha256:../../etc"}); err == nil {
+		t.Error("non-hex hash must be rejected")
+	}
+	if n, err := localName(Item{Filename: "x.MP4", Hash: good}); err != nil || !strings.HasSuffix(n, ".mp4") {
+		t.Errorf("localName = %q, %v", n, err)
 	}
 }

@@ -27,6 +27,9 @@ type Player interface {
 	Stop() error
 	// Status reports the current playback state.
 	Status() (Status, error)
+	// ShowMessage puts text on the screen while nothing is playing (status
+	// for whoever installs the device); "" clears it.
+	ShowMessage(text string) error
 	// Close releases any resources held by the backend (sockets, processes).
 	Close() error
 }
@@ -67,6 +70,8 @@ func (p *NoopPlayer) Stop() error {
 func (p *NoopPlayer) Status() (Status, error) {
 	return p.status, nil
 }
+
+func (p *NoopPlayer) ShowMessage(string) error { return nil }
 
 func (p *NoopPlayer) Close() error {
 	return nil

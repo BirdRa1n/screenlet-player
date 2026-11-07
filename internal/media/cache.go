@@ -8,23 +8,38 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/BirdRa1n/screenlet-player/internal/storage"
 )
 
 // Cache stores channel assets under the player's config directory so they
-// survive reboots. Reads are cheap (existence + size); the comparatively
-// expensive content-hash check runs only when fetching a new asset, never on
-// the boot/local path.
+// survive reboots.
+//
+// Files are content-addressed: each one is stored as "<sha256>.<ext>", never
+// under the server's filename. That makes a cached file immutable — an
+// in-place re-render in Studio (same filename, new bytes) gets a new hash and
+// therefore a new file, so the copy mpv is playing right now is never
+// overwritten or deleted out from under it, and "is this item cached?" is
+// answered by a stat, with no bookkeeping that could drift from what is
+// actually on disk.
 type Cache struct {
-	dir  string
-	http *http.Client
+	dir   string
+	http  *http.Client
+	stall time.Duration
 }
+
+// stallTimeout aborts a download that has received no bytes for this long. A
+// total-time limit would instead kill a healthy-but-slow download of a large
+// video over Wi-Fi; a stalled one resumes from its .part file next time.
+const stallTimeout = 60 * time.Second
 
 // mediaDir returns the cache directory path (without creating it).
 func mediaDir() (string, error) {
@@ -44,9 +59,14 @@ func NewCache() (*Cache, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	// Generous timeout: signage videos can be large and links slow, but a
-	// stuck connection should still eventually fail rather than hang forever.
-	return &Cache{dir: dir, http: &http.Client{Timeout: 10 * time.Minute}}, nil
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		IdleConnTimeout:       60 * time.Second,
+	}
+	return &Cache{dir: dir, http: &http.Client{Transport: transport}, stall: stallTimeout}, nil
 }
 
 // Dir returns the media cache directory.
@@ -63,20 +83,42 @@ func safeName(name string) (string, error) {
 	return name, nil
 }
 
-func (c *Cache) pathFor(name string) (string, error) {
-	safe, err := safeName(name)
+var (
+	hexHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	safeExt = regexp.MustCompile(`^\.[a-z0-9]{1,8}$`)
+)
+
+// localName is the content-addressed file name for an item: its sha256 plus
+// the original extension (kept so mpv can sniff the container cheaply).
+func localName(item Item) (string, error) {
+	if _, err := safeName(item.Filename); err != nil {
+		return "", err
+	}
+	sum := strings.ToLower(strings.TrimPrefix(item.Hash, "sha256:"))
+	if !hexHash.MatchString(sum) {
+		return "", fmt.Errorf("media: %s has no valid sha256 hash", item.Filename)
+	}
+	ext := strings.ToLower(filepath.Ext(item.Filename))
+	if !safeExt.MatchString(ext) {
+		ext = ""
+	}
+	return sum + ext, nil
+}
+
+func (c *Cache) pathFor(item Item) (string, error) {
+	name, err := localName(item)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(c.dir, safe), nil
+	return filepath.Join(c.dir, name), nil
 }
 
 // fileMatches reports whether the item is present on disk at its expected size.
 // Cheap by design: cached files are only ever created by a hash-verified,
-// atomic download, so a present file of the right size is known-good — there is
-// no need to re-hash it on every boot.
+// atomic download and named after that hash, so a present file of the right
+// size is known-good — there is no need to re-hash it on every boot.
 func (c *Cache) fileMatches(item Item) bool {
-	path, err := c.pathFor(item.Filename)
+	path, err := c.pathFor(item)
 	if err != nil {
 		return false
 	}
@@ -99,36 +141,68 @@ func (c *Cache) LocalPlaylist(m *Manifest) []string {
 		if !c.fileMatches(it) {
 			continue
 		}
-		if p, err := c.pathFor(it.Filename); err == nil {
+		if p, err := c.pathFor(it); err == nil {
 			paths = append(paths, p)
 		}
 	}
 	return paths
 }
 
-// Sync downloads any missing or changed items, removes assets the manifest no
-// longer references, and returns the ordered local paths ready for playback. A
-// per-item download failure is logged and collected but does not abort the
-// whole sync: whatever is already cached still plays. Items are considered
-// already-cached when the previously persisted manifest recorded the same hash
-// and the file is present at the right size — so no on-device hashing is needed
-// to decide what to fetch.
-func (c *Cache) Sync(ctx context.Context, m *Manifest) ([]string, error) {
+// Complete reports whether every item of the manifest is cached locally.
+func (c *Cache) Complete(m *Manifest) bool {
+	return m != nil && len(m.Items) > 0 && len(c.LocalPlaylist(m)) == len(m.Items)
+}
+
+// Adopt migrates files cached by older player versions, which stored them
+// under the server's filename, to their content-addressed name. Each one is
+// re-hashed first (once, ever): the old layout could end up with a manifest
+// hash that no longer matched the bytes on disk.
+func (c *Cache) Adopt(m *Manifest) {
+	if m == nil {
+		return
+	}
+	for _, it := range m.Items {
+		if c.fileMatches(it) {
+			continue
+		}
+		name, err := safeName(it.Filename)
+		if err != nil {
+			continue
+		}
+		legacy := filepath.Join(c.dir, name)
+		st, err := os.Stat(legacy)
+		if err != nil || st.IsDir() || (it.Size > 0 && st.Size() != it.Size) {
+			continue
+		}
+		dest, err := c.pathFor(it)
+		if err != nil || dest == legacy {
+			continue
+		}
+		if err := hashFile(legacy, it.Hash); err != nil {
+			log.Printf("media: not adopting legacy %s: %v", name, err)
+			continue
+		}
+		if err := os.Rename(legacy, dest); err == nil {
+			log.Printf("media: migrated cached %s to content-addressed storage", name)
+		}
+	}
+	syncDir(c.dir)
+}
+
+// Sync downloads any missing items of m and returns the ordered local paths of
+// the ones now available. A per-item failure is logged and returned (the first
+// one) but does not abort the rest. Files referenced by m or by any manifest in
+// keep — typically the one currently on screen — are never removed, so a
+// failed or partial update can never take away content that is playing.
+func (c *Cache) Sync(ctx context.Context, m *Manifest, keep ...*Manifest) ([]string, error) {
 	if m == nil {
 		return nil, errors.New("media: nil manifest")
 	}
 
-	prevHash := map[string]string{}
-	if old, ok, err := LoadManifest(); err == nil && ok {
-		for _, it := range old.Items {
-			prevHash[it.Filename] = it.Hash
-		}
-	}
-
 	var firstErr error
 	for _, it := range m.Items {
-		if prevHash[it.Filename] == it.Hash && c.fileMatches(it) {
-			continue // unchanged since last sync and still on disk
+		if c.fileMatches(it) {
+			continue
 		}
 		if err := c.download(ctx, it); err != nil {
 			log.Printf("media: failed to cache %s: %v", it.Filename, err)
@@ -136,87 +210,162 @@ func (c *Cache) Sync(ctx context.Context, m *Manifest) ([]string, error) {
 				firstErr = err
 			}
 		}
+		if ctx.Err() != nil {
+			break
+		}
 	}
 
-	c.gc(m)
+	c.GC(append([]*Manifest{m}, keep...)...)
 	return c.LocalPlaylist(m), firstErr
 }
 
-// download fetches one item to a temporary file, verifies its size and content
-// hash, then atomically renames it into place. A failed or corrupt download
-// never replaces an existing good file.
+// download fetches one item into "<name>.part", resuming a previous partial
+// download with a Range request when possible, verifies its size and content
+// hash, then atomically renames it into place. A failed download keeps the
+// .part file for the next attempt; a corrupt one is discarded.
 func (c *Cache) download(ctx context.Context, item Item) error {
-	dest, err := c.pathFor(item.Filename)
+	dest, err := c.pathFor(item)
 	if err != nil {
 		return err
 	}
-	safe := filepath.Base(dest)
+	part := dest + ".part"
+
+	var offset int64
+	if item.Size > 0 {
+		if st, err := os.Stat(part); err == nil && !st.IsDir() {
+			offset = st.Size()
+			if offset > item.Size {
+				os.Remove(part)
+				offset = 0
+			}
+		}
+	}
+	if item.Size > 0 && offset == item.Size {
+		// Fully downloaded last time but not committed (crash/power cut).
+		return c.commit(part, dest, item, nil)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(c.stall, func() { stalled.Store(true); cancel() })
+	defer watchdog.Stop()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, item.URL, nil)
 	if err != nil {
 		return err
+	}
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+
+	switch {
+	case resp.StatusCode == http.StatusPartialContent && offset > 0:
+		if !strings.HasPrefix(resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", offset)) {
+			os.Remove(part)
+			return fmt.Errorf("media: %s unexpected Content-Range %q", item.Filename, resp.Header.Get("Content-Range"))
+		}
+	case resp.StatusCode == http.StatusOK:
+		offset = 0 // server ignored the Range: start over
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		os.Remove(part)
+		return fmt.Errorf("media: %s range not satisfiable, restarting next time", item.Filename)
+	default:
 		return fmt.Errorf("media: %s returned HTTP %d", item.URL, resp.StatusCode)
 	}
 
-	tmp, err := os.CreateTemp(c.dir, safe+".*.part")
+	flags := os.O_CREATE | os.O_WRONLY
+	if offset == 0 {
+		flags |= os.O_TRUNC
+	} else {
+		flags |= os.O_APPEND
+	}
+	f, err := os.OpenFile(part, flags, 0o600)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	committed := false
-	defer func() {
-		tmp.Close()
-		if !committed {
-			os.Remove(tmpName)
+	hasher := sha256.New()
+	if offset > 0 {
+		if err := hashPrefix(part, offset, hasher); err != nil {
+			f.Close()
+			os.Remove(part)
+			return err
 		}
-	}()
+	}
 
 	// Cap the read at the advertised size (+1 to detect an overrun) so a server
 	// cannot fill the disk by streaming far more than it declared.
 	var src io.Reader = resp.Body
 	if item.Size > 0 {
-		src = io.LimitReader(resp.Body, item.Size+1)
+		src = io.LimitReader(resp.Body, item.Size-offset+1)
 	}
-	hasher := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, hasher), src)
+	src = &activityReader{r: src, onRead: func() { watchdog.Reset(c.stall) }}
+	n, copyErr := io.Copy(io.MultiWriter(f, hasher), src)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if copyErr != nil {
+		if stalled.Load() {
+			return fmt.Errorf("media: %s stalled after %d bytes, will resume", item.Filename, offset+n)
+		}
+		return copyErr
+	}
+	if syncErr != nil {
+		return syncErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	total := offset + n
+	if item.Size > 0 && total < item.Size {
+		return fmt.Errorf("media: %s incomplete (%d of %d bytes), will resume", item.Filename, total, item.Size)
+	}
+	if item.Size > 0 && total > item.Size {
+		os.Remove(part)
+		return fmt.Errorf("media: %s size mismatch: got more than %d bytes", item.Filename, item.Size)
+	}
+	return c.commit(part, dest, item, hasher.Sum(nil))
+}
+
+// commit verifies a finished .part file (hashing it if sum is nil) and renames
+// it into place durably.
+func (c *Cache) commit(part, dest string, item Item, sum []byte) error {
+	var err error
+	if sum == nil {
+		err = hashFile(part, item.Hash)
+	} else {
+		err = verifyDigest(sum, item.Hash)
+	}
 	if err != nil {
+		os.Remove(part)
 		return err
 	}
-	if item.Size > 0 && n != item.Size {
-		return fmt.Errorf("media: %s size mismatch: got %d want %d", item.Filename, n, item.Size)
-	}
-	if err := verifyDigest(hasher.Sum(nil), item.Hash); err != nil {
+	_ = os.Chmod(part, 0o600)
+	if err := os.Rename(part, dest); err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmpName, 0o600)
-	if err := os.Rename(tmpName, dest); err != nil {
-		return err
-	}
-	committed = true
 	syncDir(c.dir) // make the rename itself durable
 	return nil
 }
 
-// gc removes cached files (and any orphaned temp files) the current manifest no
-// longer references, keeping a device's SD card from filling up over its life.
-func (c *Cache) gc(m *Manifest) {
-	keep := make(map[string]bool, len(m.Items))
-	for _, it := range m.Items {
-		if safe, err := safeName(it.Filename); err == nil {
-			keep[safe] = true
+// GC removes cached files (and stale partial downloads) that none of the given
+// manifests reference, keeping a device's SD card from filling up over its
+// life. Partial downloads of referenced items are kept so they can resume.
+func (c *Cache) GC(manifests ...*Manifest) {
+	keep := map[string]bool{}
+	for _, m := range manifests {
+		if m == nil {
+			continue
+		}
+		for _, it := range m.Items {
+			if name, err := localName(it); err == nil {
+				keep[name] = true
+				keep[name+".part"] = true
+			}
 		}
 	}
 	entries, err := os.ReadDir(c.dir)
@@ -227,8 +376,51 @@ func (c *Cache) gc(m *Manifest) {
 		if keep[e.Name()] {
 			continue
 		}
-		os.Remove(filepath.Join(c.dir, e.Name()))
+		os.RemoveAll(filepath.Join(c.dir, e.Name()))
 	}
+}
+
+// activityReader calls onRead every time bytes arrive (feeds the stall watchdog).
+type activityReader struct {
+	r      io.Reader
+	onRead func()
+}
+
+func (a *activityReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.onRead()
+	}
+	return n, err
+}
+
+func hashPrefix(path string, n int64, h io.Writer) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	got, err := io.Copy(h, io.LimitReader(f, n))
+	if err != nil {
+		return err
+	}
+	if got != n {
+		return fmt.Errorf("media: partial file shorter than expected")
+	}
+	return nil
+}
+
+func hashFile(path, expected string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	return verifyDigest(h.Sum(nil), expected)
 }
 
 func verifyDigest(sum []byte, expected string) error {

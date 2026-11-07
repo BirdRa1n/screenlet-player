@@ -51,8 +51,11 @@ func (a ChannelAssignment) changeKey() string {
 // channel assignment and notifies subscribers when it changes.
 type Syncer interface {
 	// Start begins polling at the given interval, invoking onChange whenever
-	// the assignment differs from the last known one.
-	Start(interval time.Duration, onChange func(ChannelAssignment)) error
+	// the assignment differs from the last one onChange reported as applied.
+	// onChange returns false when it could only partly apply the assignment
+	// (e.g. some downloads failed); the same assignment is then delivered
+	// again on the next tick instead of being considered done.
+	Start(interval time.Duration, onChange func(ChannelAssignment) bool) error
 	Stop()
 }
 
@@ -135,7 +138,7 @@ func NewPoller(client *Client) *Poller {
 // Start begins polling immediately, then on every tick of interval. It
 // returns control to the caller right away — polling happens in the
 // background until Stop is called.
-func (p *Poller) Start(interval time.Duration, onChange func(ChannelAssignment)) error {
+func (p *Poller) Start(interval time.Duration, onChange func(ChannelAssignment) bool) error {
 	p.stop = make(chan struct{})
 
 	var lastKey string
@@ -150,9 +153,13 @@ func (p *Poller) Start(interval time.Duration, onChange func(ChannelAssignment))
 		}
 		if paired {
 			if key := assignment.changeKey(); !haveLast || key != lastKey {
-				lastKey = key
-				haveLast = true
-				onChange(assignment)
+				// Only remember the key once it was fully applied: marking it
+				// seen up front meant a failed download was never retried
+				// until the channel changed again.
+				if onChange(assignment) {
+					lastKey = key
+					haveLast = true
+				}
 			}
 		}
 	}

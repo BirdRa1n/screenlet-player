@@ -40,13 +40,36 @@ downloads what the `version`/hash says actually changed and hot-swaps the
 playlist. If Studio is never reachable, the device keeps looping the last
 cached programming indefinitely.
 
-Safety properties that matter here: downloads are written to a temp file,
-fsynced, hash-verified and only then atomically renamed into place (a crash
-or power cut can never leave a truncated file the player would try to play);
-filenames from the server are strictly validated to prevent path traversal;
-and the read at download time is capped at the declared size so a server
-can't fill the disk. The legacy live-stream URL is still accepted as a
-fallback for channels (or older Studio builds) that advertise no manifest.
+Safety properties that matter here:
+
+- **Content-addressed files.** Each asset is stored as `<sha256>.<ext>`, not
+  under the server's filename. An in-place re-render in Studio (same name,
+  new bytes) becomes a new file, so the copy on screen is never overwritten,
+  and "is it cached?" is a `stat`, with no bookkeeping that can drift from
+  the disk. Caches from older versions (stored by filename) are re-hashed
+  once and migrated at boot.
+- **Atomic, verified, resumable downloads.** Bytes go to `<name>.part`,
+  are fsynced, hash-verified and only then renamed into place — a crash or
+  power cut never leaves a truncated file mpv would try to play. A dropped
+  connection keeps the `.part` and resumes with a `Range` request; a
+  download is only aborted when no bytes arrive for 60 s (never by a total
+  time limit, which would kill large videos on slow links). Reads are capped
+  at the declared size and filenames are validated against path traversal.
+- **The screen never loses what it has.** A new channel version keeps the
+  current content on screen until *every* file of the new one is cached;
+  only then does playback swap and the old files get collected. If the
+  update fails halfway (PC turned off, file deleted), the sync poller
+  retries the same version on the next tick instead of considering it done.
+- **The PC's live stream is a last resort.** `playlistUrl` (`/channel/<id>`,
+  re-encoded by ffmpeg on the PC) is only played when nothing at all is
+  cached. It dies with the PC, so mpv is watched and reconnected, and the
+  device switches to the local cache as soon as files arrive.
+- **No console, ever.** mpv runs with `--force-window=yes` and
+  `--keep-open=yes`: idle or at the end of a non-looping playlist it keeps a
+  black window (or holds the last frame) instead of closing and exposing the
+  Linux console. With nothing to play the screen shows a status message
+  (device IP and pairing code). A watchdog reloads the content if mpv is
+  ever found idle while it should be playing.
 
 ## Component map
 
@@ -85,6 +108,7 @@ device is actually claimed, not just controlled:
 | GET    | `/status`   | `Bearer <token>`       | Current playback state (playing, source)       |
 | POST   | `/play`     | `Bearer <token>`       | `{"source": "http(s)://..."}` — switch playback |
 | POST   | `/stop`     | `Bearer <token>`       | Halt playback                                  |
+| POST   | `/studio`   | `Bearer <token>`       | `{"studioUrl": "..."}` — the claiming Studio's new address (its IP changed); persisted, sync/telemetry restart against it |
 
 This deliberately stays smaller than Kodi's full JSON-RPC surface — the
 player only needs to do one job. `/identify` and `/claim` are the one

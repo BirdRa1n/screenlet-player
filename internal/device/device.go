@@ -109,6 +109,17 @@ func StudioURL() (string, error) {
 	return cfg.StudioURL, nil
 }
 
+// SetStudioURL persists a new Screenlet Studio base URL — sent by the Studio
+// that claimed this device when its own address changed (POST /studio).
+func SetStudioURL(studioURL string) error {
+	cfg, err := storage.Load()
+	if err != nil {
+		return err
+	}
+	cfg.StudioURL = studioURL
+	return storage.Save(cfg)
+}
+
 // GenerateAPIToken mints and persists a new control-API bearer token,
 // overwriting any existing one. studioURL is persisted too when non-empty,
 // so a device claimed without -studio-url at boot still knows where to

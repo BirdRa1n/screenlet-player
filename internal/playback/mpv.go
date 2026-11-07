@@ -51,11 +51,14 @@ type MPVPlayer struct {
 	lastPlaylist []string
 	lastLoop     bool
 
-	nextID int64
+	message string // text shown on the idle screen (ShowMessage), re-applied after a respawn
+
+	nextID   int64
+	stopWait chan struct{}
 }
 
 type mpvCommand struct {
-	Command   []any `json:"command"`
+	Command   any   `json:"command"` // positional []any, or a map for named-argument commands
 	RequestID int64 `json:"request_id"`
 }
 
@@ -95,9 +98,69 @@ func NewMPVPlayer(opts MPVOptions) (*MPVPlayer, error) {
 		stderr:    proc.stderr,
 		conn:      proc.conn,
 		pending:   make(map[int64]chan mpvResponse),
+		stopWait:  make(chan struct{}),
 	}
 	go p.readLoop(proc.conn)
+	go p.watchdog(watchdogInterval)
 	return p, nil
+}
+
+const watchdogInterval = 5 * time.Second
+
+// watchdog notices mpv sitting idle (or at EOF of a live stream) while it is
+// supposed to be showing something, and reloads the last content. A live
+// stream from Studio ends the moment the PC goes away; without this the
+// screen would stay on that last frame (or black) until the next channel
+// change, which may never come. Polling a property every few seconds is
+// cheap and also covers mpv versions whose event stream differs.
+func (p *MPVPlayer) watchdog(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.stopWait:
+			return
+		case <-ticker.C:
+		}
+
+		p.mu.Lock()
+		source := p.lastSource
+		playlist := append([]string(nil), p.lastPlaylist...)
+		loop := p.lastLoop
+		connected := p.conn != nil
+		p.mu.Unlock()
+		if !connected || (source == "" && len(playlist) == 0) {
+			continue
+		}
+
+		idle := p.boolProperty("idle-active")
+		eof := source != "" && p.boolProperty("eof-reached")
+		if !idle && !eof {
+			continue
+		}
+		switch {
+		case len(playlist) > 0:
+			log.Printf("mpv: idle while a playlist should be playing — reloading it")
+			if err := p.PlayPlaylist(playlist, loop); err != nil {
+				log.Printf("mpv: reload playlist: %v", err)
+			}
+		case source != "":
+			log.Printf("mpv: stream %s ended or failed — reconnecting", source)
+			if err := p.Play(source); err != nil {
+				log.Printf("mpv: reconnect: %v", err)
+			}
+		}
+	}
+}
+
+func (p *MPVPlayer) boolProperty(name string) bool {
+	data, err := p.call("get_property", name)
+	if err != nil {
+		return false
+	}
+	var v bool
+	_ = json.Unmarshal(data, &v)
+	return v
 }
 
 // launchMPV starts a fresh mpv process and connects to its IPC socket.
@@ -123,9 +186,23 @@ func launchMPV(opts MPVOptions) (*mpvProcess, error) {
 
 	args := append([]string{
 		"--idle=yes",
+		// Keep the (black) window up even with nothing loaded. Without it mpv
+		// closes its window whenever it goes idle — a dropped live stream, the
+		// end of a non-looping playlist, no content yet — and the screen falls
+		// back to whatever is underneath: on a kiosk, the Linux console.
+		"--force-window=yes",
+		// At the end of a non-looping playlist, hold the last frame instead of
+		// going idle.
+		"--keep-open=yes",
 		"--fullscreen",
 		"--no-terminal",
 		"--really-quiet",
+		// No on-screen controller (also hides mpv's idle logo), no mouse
+		// cursor, and no default key bindings: a stray keyboard press ("q")
+		// must not quit or pause the signage.
+		"--osc=no",
+		"--cursor-autohide=always",
+		"--input-default-bindings=no",
 		"--input-ipc-server=" + sockPath,
 	}, opts.ExtraArgs...)
 
@@ -268,6 +345,13 @@ func (p *MPVPlayer) respawn(resume resumeState) {
 		go p.readLoop(proc.conn)
 		log.Printf("mpv: respawned successfully after %d attempt(s)", attempt+1)
 
+		p.mu.Lock()
+		msg := p.message
+		p.mu.Unlock()
+		if msg != "" {
+			_ = p.ShowMessage(msg)
+		}
+
 		switch {
 		case len(resume.playlist) > 0:
 			if err := p.PlayPlaylist(resume.playlist, resume.loop); err != nil {
@@ -291,6 +375,12 @@ func respawnBackoff(attempt int) time.Duration {
 }
 
 func (p *MPVPlayer) call(args ...any) (json.RawMessage, error) {
+	return p.send(args)
+}
+
+// send issues one IPC command (positional []any or a named-argument map) and
+// waits for its response.
+func (p *MPVPlayer) send(command any) (json.RawMessage, error) {
 	id := atomic.AddInt64(&p.nextID, 1)
 	ch := make(chan mpvResponse, 1)
 
@@ -303,7 +393,7 @@ func (p *MPVPlayer) call(args ...any) (json.RawMessage, error) {
 	p.pending[id] = ch
 	p.mu.Unlock()
 
-	payload, err := json.Marshal(mpvCommand{Command: args, RequestID: id})
+	payload, err := json.Marshal(mpvCommand{Command: command, RequestID: id})
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +424,7 @@ func (p *MPVPlayer) call(args ...any) (json.RawMessage, error) {
 }
 
 func (p *MPVPlayer) Play(source string) error {
+	_, _ = p.call("set_property", "loop-file", "no")
 	if _, err := p.call("loadfile", source, "replace"); err != nil {
 		return err
 	}
@@ -362,16 +453,24 @@ func (p *MPVPlayer) PlayPlaylist(paths []string, loop bool) error {
 		return err
 	}
 
+	// Set looping before loading so there is no window in which a short
+	// playlist ends before the property lands. A single looping file uses
+	// loop-file, which mpv plays seamlessly instead of reopening it.
+	loopPlaylist, loopFile := "no", "no"
+	switch {
+	case loop && len(paths) == 1:
+		loopFile = "inf"
+	case loop:
+		loopPlaylist = "inf"
+	}
+	for prop, val := range map[string]string{"loop-playlist": loopPlaylist, "loop-file": loopFile} {
+		if _, err := p.call("set_property", prop, val); err != nil {
+			// Non-fatal: the content still plays, it just won't loop on its own.
+			log.Printf("mpv: failed to set %s=%s: %v", prop, val, err)
+		}
+	}
 	if _, err := p.call("loadlist", listPath, "replace"); err != nil {
 		return err
-	}
-	loopVal := "no"
-	if loop {
-		loopVal = "inf"
-	}
-	if _, err := p.call("set_property", "loop-playlist", loopVal); err != nil {
-		// Non-fatal: the content still plays, it just won't loop on its own.
-		log.Printf("mpv: failed to set loop-playlist=%s: %v", loopVal, err)
 	}
 
 	p.mu.Lock()
@@ -434,8 +533,50 @@ func (p *MPVPlayer) Status() (Status, error) {
 	return status, nil
 }
 
+// ShowMessage draws text centered on the screen through an OSD overlay — the
+// status shown on the idle screen before any content arrives. OSD draws over
+// video, so callers clear it ("") once something plays. Needs mpv ≥ 0.31;
+// older versions just keep a black screen.
+func (p *MPVPlayer) ShowMessage(text string) error {
+	p.mu.Lock()
+	p.message = text
+	p.mu.Unlock()
+	cmd := map[string]any{"name": "osd-overlay", "id": 1, "format": "none", "data": ""}
+	if text != "" {
+		cmd["format"] = "ass-events"
+		cmd["data"] = assMessage(text)
+		cmd["res_x"] = 1920
+		cmd["res_y"] = 1080
+		cmd["z"] = -1
+	}
+	_, err := p.send(cmd)
+	return err
+}
+
+// assMessage renders text as a centered ASS event (\an5 = middle-center),
+// first line large, the rest smaller and dimmed.
+func assMessage(text string) string {
+	esc := strings.NewReplacer("\\", "\\\\", "{", "\\{", "}", "\\}")
+	lines := strings.Split(text, "\n")
+	var b strings.Builder
+	b.WriteString("{\\an5\\bord0\\shad0\\fs80\\b1\\1c&HFFFFFF&}")
+	for i, l := range lines {
+		if i == 1 {
+			b.WriteString("{\\fs42\\b0\\1c&HB0B0B0&}")
+		}
+		if i > 0 {
+			b.WriteString("\\N")
+		}
+		b.WriteString(esc.Replace(l))
+	}
+	return b.String()
+}
+
 func (p *MPVPlayer) Close() error {
 	p.mu.Lock()
+	if !p.closed && p.stopWait != nil {
+		close(p.stopWait)
+	}
 	p.closed = true // must be set before reading conn/cmd/socketDir: stops any in-flight respawn from racing this
 	conn := p.conn
 	cmd := p.cmd

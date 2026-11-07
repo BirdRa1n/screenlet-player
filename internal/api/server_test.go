@@ -196,3 +196,31 @@ func TestHandleClaim_RejectsSecondAttempt(t *testing.T) {
 		t.Fatalf("/claim on already-claimed device = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
+
+func TestHandleStudio(t *testing.T) {
+	var got string
+	srv := New(playback.NewNoopPlayer(), Options{
+		Token:       testToken,
+		Mint:        func(string) (ClaimResult, error) { return ClaimResult{}, nil },
+		OnStudioURL: func(u string) error { got = u; return nil },
+	})
+	h := srv.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/studio", strings.NewReader(`{"studioUrl":"http://10.0.0.9:7095/"}`)))
+	if rec.Code != http.StatusUnauthorized || got != "" {
+		t.Fatalf("unauthenticated /studio = %d (url %q), want 401 and no change", rec.Code, got)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authed(httptest.NewRequest(http.MethodPost, "/studio", strings.NewReader(`{"studioUrl":"file:///etc"}`))))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-http studioUrl = %d, want 400", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authed(httptest.NewRequest(http.MethodPost, "/studio", strings.NewReader(`{"studioUrl":"http://10.0.0.9:7095/"}`))))
+	if rec.Code != http.StatusNoContent || got != "http://10.0.0.9:7095" {
+		t.Fatalf("/studio = %d, url %q", rec.Code, got)
+	}
+}

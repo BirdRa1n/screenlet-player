@@ -61,10 +61,11 @@ func TestPollerNotifiesOnChange(t *testing.T) {
 
 	var mu stdsync.Mutex
 	var calls int
-	if err := poller.Start(20*time.Millisecond, func(ChannelAssignment) {
+	if err := poller.Start(20*time.Millisecond, func(ChannelAssignment) bool {
 		mu.Lock()
 		calls++
 		mu.Unlock()
+		return true
 	}); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -79,5 +80,34 @@ func TestPollerNotifiesOnChange(t *testing.T) {
 	// (on first successful fetch) even though several polls happen.
 	if got != 1 {
 		t.Fatalf("onChange called %d times, want exactly 1", got)
+	}
+}
+
+func TestPollerRetriesUntilApplied(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"paired":true,"channelId":"ch1","version":"v1","items":[]}`))
+	}))
+	defer srv.Close()
+
+	poller := NewPoller(NewClient(srv.URL, "device-1"))
+	var mu stdsync.Mutex
+	var calls int
+	if err := poller.Start(15*time.Millisecond, func(ChannelAssignment) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return calls >= 3 // the first two attempts "fail" (e.g. download error)
+	}); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer poller.Stop()
+
+	time.Sleep(150 * time.Millisecond)
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 3 {
+		t.Fatalf("onChange called %d times, want 3 (retried until applied, then stable)", got)
 	}
 }
